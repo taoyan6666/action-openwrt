@@ -10,21 +10,23 @@
 # See /LICENSE for more information.
 #
 
-name: OpenWrt Builder
+name: zn-m2 build
 
 on:
   repository_dispatch:
   workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
 
 env:
   REPO_URL: https://github.com/openwrt-fork/sdf8057-ipq6000.git
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: .config
+  CONFIG_FILE: ./config/zn-m2.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
 
@@ -33,6 +35,24 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+    
+    - name: Apt Update
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt-get update
+        
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
     - name: Checkout
       uses: actions/checkout@main
 
@@ -40,13 +60,15 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
+        curl -s https://raw.githubusercontent.com/immortalwrt/build-scripts/master/init_build_environment.sh | sudo bash
+        sudo apt-get install -y rename pigz libfuse-dev upx subversion clang
+        sudo apt-get autoremove -y --purge
+        sudo apt-get clean
+        sudo rm -rf po2lmo
         sudo timedatectl set-timezone "$TZ"
+        git config --global user.email ${{ github.actor }}@users.noreply.github.com
+        git config --global user.name ${{ github.actor }}
+        git config --global init.defaultBranch master
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
 
@@ -59,6 +81,7 @@ jobs:
 
     - name: Load custom feeds
       run: |
+        set -x
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
@@ -67,16 +90,24 @@ jobs:
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
+    - name: Modify feeds
+      run: |
+        set -x
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
     - name: Load custom configuration
       run: |
+        set -x
         [ -e files ] && mv files openwrt/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
+        chmod +x $DIY_P3_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        $GITHUB_WORKSPACE/$DIY_P3_SH
 
     - name: Download package
       id: package
@@ -99,7 +130,6 @@ jobs:
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: Check space usage
-      if: (!cancelled())
       run: df -hT
 
     - name: Upload bin directory
@@ -111,7 +141,6 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
@@ -122,39 +151,47 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: ipq6000${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: env.UPLOAD_RELEASE == 'true'
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=v$(date +"%Y.%m.%d.%H%M")/zn-m2/basic" >> $GITHUB_OUTPUT
         touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
+        echo "ZN-M2 firmware" >> release.txt
+        grep luci-app-passwall ${{ env.FIRMWARE }}/openwrt-ipq60xx-generic-device-zn-m2.manifest | awk -F" - " '{print "Passwall " "`"$2"`"}' >> release.txt
+        grep xray-core ${{ env.FIRMWARE }}/openwrt-ipq60xx-generic-device-zn-m2.manifest | awk -F" - " '{print $2}'| awk -F"-" '{print "Xray " "`"$1"`"}' >> release.txt
+        grep sing-box ${{ env.FIRMWARE }}/openwrt-ipq60xx-generic-device-zn-m2.manifest | awk -F" - " '{print $2}'| awk -F"-" '{print "Sing-Box " "`"$1"`"}' >> release.txt
+        grep hysteria ${{ env.FIRMWARE }}/openwrt-ipq60xx-generic-device-zn-m2.manifest | awk -F" - " '{print $2}'| awk -F"-" '{print "Hysteria " "`"$1"`"}' >> release.txt
+        grep chinadns-ng ${{ env.FIRMWARE }}/openwrt-ipq60xx-generic-device-zn-m2.manifest | awk -F" - " '{print $2}'| awk -F"-" '{print "ChinaDNS-NG " "`"$1"`"}' >> release.txt
+        echo "详细包信息请查看 manifest 文件" >> release.txt
+        grep luci-app-passwall ${{ env.FIRMWARE }}/openwrt-ipq60xx-generic-device-zn-m2.manifest | awk -F" - " '{print "release_name=Passwall " $2}' >> $GITHUB_OUTPUT
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
-      uses: softprops/action-gh-release@master
+      uses: softprops/action-gh-release@v2.1.0
       if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
+        name: ${{ steps.tag.outputs.release_name }}
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+        files: |
+         ${{ env.FIRMWARE }}/*.ubi
+         ${{ env.FIRMWARE }}/*.bin
+         ${{ env.FIRMWARE }}/*.manifest
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
+    - name: Delete releases and workflows runs
+      uses: ophub/delete-releases-workflows@main
       with:
-        retain_days: 0
-        keep_minimum_runs: 2
+        delete_workflows: true
+        workflows_keep_day: 3
+        gh_token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
+    - name: Delete Tags without Release
+      uses: Huanyueyichen/delete-tags-without-release-action@v0.2.0
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
